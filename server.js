@@ -82,7 +82,7 @@ function enviarWhatsApp(numero, texto) {
     return;
   }
 
-  const body = JSON.stringify({ number: numero, text: texto, options: { delay: 1200 } });
+  const body = JSON.stringify({ number: numero, textMessage: { text: texto }, options: { delay: 1200 } });
   const url = new URL(`${EVOLUTION_URL}/message/sendText/${INSTANCE}`);
   const lib = url.protocol === 'https:' ? https : http;
 
@@ -186,7 +186,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
       if (remoteJid.includes('@g.us')) continue; // ignora grupos
 
       // Suporta @s.whatsapp.net e @lid (formato novo WhatsApp)
-      const numero = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '');
+      // @lid é formato novo do WhatsApp — extrai só dígitos para envio e sessão
+      const numero = remoteJid.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '');
       const texto =
         data.message?.conversation ||
         data.message?.extendedTextMessage?.text ||
@@ -200,8 +201,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
       const result = await processarMensagem(texto, `wa_${numero}`, 'whatsapp', numero);
       if (result.reply) {
-        // Usa o remoteJid completo para garantir entrega correta
-        enviarWhatsApp(remoteJid, result.reply);
+        // Sempre envia com @s.whatsapp.net — Evolution API v1 não suporta @lid
+        const jidEnvio = numero + '@s.whatsapp.net';
+        enviarWhatsApp(jidEnvio, result.reply);
       }
     }
   } catch (err) {
