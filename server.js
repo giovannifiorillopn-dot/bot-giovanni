@@ -62,7 +62,15 @@ async function enviarVideo(phone, videoUrl, caption) {
   return zapiReq('POST', '/send-video', { phone: clean, video: videoUrl, caption: caption || '' });
 }
 
+async function enviarImagem(phone, imageUrl, caption) {
+  const clean = phone.replace(/\D/g, '');
+  return zapiReq('POST', '/send-image', { phone: clean, image: imageUrl, caption: caption || '' });
+}
+
 const VIDEO_TRICOSCOPIA = 'https://bot-giovanni-production.up.railway.app/tricoscopia.mp4';
+const FOTOS_RESULTADOS = Array.from({length: 9}, (_, i) =>
+  `https://bot-giovanni-production.up.railway.app/resultado${i+1}.jpg`
+);
 
 // ─── Prompts ──────────────────────────────────────────────
 
@@ -98,9 +106,10 @@ SOBRE O PROCEDIMENTO E VALORES:
 SOBRE A TRICOSCOPIA (use esse texto quando explicar):
 "O primeiro passo é realizar a análise da área doadora com a tricoscopia. Esse exame visualiza os fios e o couro cabeludo em tamanho aumentado, permitindo ao Dr. Giovanni montar o planejamento cirúrgico — definindo a técnica utilizada (FUE, BHT, entre outras) e a quantidade estimada de fios para cobertura da área."
 
-ENVIO DE VÍDEO:
-- Quando explicar a tricoscopia pela primeira vez, inclua exatamente ao final da sua mensagem: [VIDEO_TRICOSCOPIA]
-- Use apenas uma vez por conversa. Não inclua em outras situações.
+ENVIO DE MÍDIA (use apenas uma vez por conversa cada tag):
+- Quando explicar a tricoscopia pela primeira vez → inclua ao final: [VIDEO_TRICOSCOPIA]
+- Quando o lead perguntar sobre resultados, fotos ou quiser ver exemplos → inclua ao final: [FOTOS_RESULTADOS]
+- Nunca use as duas tags na mesma mensagem. Nunca mencione que vai enviar fotos/vídeo antes de usar a tag.
 ${canalInfo}
 
 SEU PAPEL:
@@ -172,9 +181,15 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
     enviarVideoTricoscopia = true;
   }
 
+  let enviarFotosResultados = false;
+  if (reply.includes('[FOTOS_RESULTADOS]')) {
+    reply = reply.replace('[FOTOS_RESULTADOS]', '').trim();
+    enviarFotosResultados = true;
+  }
+
   session.history.push({ role: 'assistant', content: reply });
 
-  return { reply, sessionId, enviarVideoTricoscopia };
+  return { reply, sessionId, enviarVideoTricoscopia, enviarFotosResultados };
 }
 
 // ─── GET /qrcode ──────────────────────────────────────────
@@ -226,6 +241,14 @@ app.post('/webhook/zapi', async (req, res) => {
       await new Promise(r => setTimeout(r, 1500));
       await enviarVideo(phone, VIDEO_TRICOSCOPIA, '');
       console.log(`[Z-API] Vídeo tricoscopia enviado para ${phone}`);
+    }
+    if (result.enviarFotosResultados) {
+      for (let i = 0; i < FOTOS_RESULTADOS.length; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        const caption = i === 0 ? 'Alguns resultados do Dr. Giovanni Fiorillo 👇' : '';
+        await enviarImagem(phone, FOTOS_RESULTADOS[i], caption);
+      }
+      console.log(`[Z-API] Fotos de resultados enviadas para ${phone}`);
     }
   } catch (e) {
     console.error('[Z-API] Erro ao responder:', e.message);
