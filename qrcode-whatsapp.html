@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>QR Code WhatsApp — Bot Dr. Giovanni</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #0d1b2a; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  .card { background: #fff; border-radius: 16px; padding: 32px; text-align: center; max-width: 420px; }
+  .card img { width: 300px; height: 300px; display: block; margin: 0 auto; border: 4px solid #25D366; border-radius: 8px; }
+  .card h2 { color: #0d1b2a; margin-bottom: 4px; }
+  .card p { color: #555; font-size: 14px; margin: 4px 0; }
+  .badge { background: #25D366; color: #fff; border-radius: 8px; padding: 6px 16px; font-size: 14px; font-weight: bold; margin-top: 12px; display: inline-block; }
+  .badge.erro { background: #e74c3c; }
+  .badge.ok { background: #27ae60; }
+  .steps { color: #ccc; margin-top: 24px; text-align: left; max-width: 380px; padding: 0 16px; }
+  .steps li { margin-bottom: 10px; font-size: 15px; line-height: 1.5; }
+  strong { color: #fff; }
+  #timer { color: #f39c12; font-size: 13px; margin-top: 8px; font-weight: bold; }
+  #status-msg { font-size: 13px; margin-top: 6px; color: #888; }
+  button { background: #25D366; color: white; border: none; padding: 10px 24px; border-radius: 8px; font-size: 15px; cursor: pointer; margin-top: 14px; }
+  button:hover { background: #1da851; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h2>Bot Dr. Giovanni Fiorillo</h2>
+  <p>Escaneie com o WhatsApp Business</p>
+  <img id="qr" src="" alt="Carregando..." style="display:none">
+  <div id="badge" class="badge">Carregando QR code...</div>
+  <div id="timer"></div>
+  <div id="status-msg"></div>
+  <button onclick="buscarQR()">🔄 Atualizar QR code</button>
+</div>
+
+<ol class="steps">
+  <li>Abra o <strong>WhatsApp Business</strong> no celular</li>
+  <li>Toque nos <strong>três pontinhos</strong> → <em>Dispositivos conectados</em></li>
+  <li>Toque em <strong>Conectar um dispositivo</strong></li>
+  <li>Aponte a câmera para o QR code acima</li>
+</ol>
+
+<script>
+const BOT = 'https://bot-giovanni-production.up.railway.app';
+let intervalo = null;
+let seg = 0;
+
+async function buscarQR() {
+  clearInterval(intervalo);
+  document.getElementById('badge').textContent = 'Buscando QR code...';
+  document.getElementById('badge').className = 'badge';
+  document.getElementById('timer').textContent = '';
+  try {
+    const r = await fetch(BOT + '/qrcode');
+    const d = await r.json();
+    if (d.status === 'connected') {
+      conectado();
+    } else if (d.status === 'qr' && d.qr) {
+      document.getElementById('qr').src = d.qr;
+      document.getElementById('qr').style.display = 'block';
+      document.getElementById('badge').textContent = '✓ Pronto! Escaneie agora';
+      document.getElementById('badge').className = 'badge';
+      seg = 28;
+      intervalo = setInterval(() => {
+        seg--;
+        document.getElementById('timer').textContent = 'Renovando em ' + seg + 's...';
+        if (seg <= 0) buscarQR();
+      }, 1000);
+    } else {
+      document.getElementById('qr').style.display = 'none';
+      document.getElementById('badge').textContent = 'Aguardando conexão... (status: ' + d.status + ')';
+      document.getElementById('badge').className = 'badge';
+      setTimeout(buscarQR, 3000);
+    }
+  } catch(e) {
+    document.getElementById('badge').textContent = 'Erro de rede: ' + e.message;
+    document.getElementById('badge').className = 'badge erro';
+    setTimeout(buscarQR, 5000);
+  }
+}
+
+function conectado() {
+  clearInterval(intervalo);
+  document.getElementById('badge').textContent = '✅ WhatsApp conectado com sucesso!';
+  document.getElementById('badge').className = 'badge ok';
+  document.getElementById('timer').textContent = '';
+  document.getElementById('qr').style.display = 'none';
+  document.getElementById('status-msg').textContent = 'O bot está ativo e pronto para responder mensagens no WhatsApp!';
+}
+
+buscarQR();
+setInterval(async () => {
+  try {
+    const r = await fetch(BOT + '/wa-status');
+    const d = await r.json();
+    if (d.status === 'connected') conectado();
+  } catch(e) {}
+}, 4000);
+</script>
+
+</body>
+</html>
