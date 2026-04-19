@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
+const https = require('https');
+const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 
@@ -10,9 +12,7 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Sessões: { history, lastActivity, channel, phoneNumber, atendido }
 const sessions = new Map();
-// Números já atendidos por ligação (bot para de responder)
 const atendidos = new Set();
 
 setInterval(() => {
@@ -70,60 +70,134 @@ O Dr. Giovanni já foi notificado do seu contato e entrará em contato com você
 
 Enquanto isso, me conta uma coisa: o senhor já realizou a análise da sua área doadora com a *tricoscopia*?`;
 
-// ─── POST /chat ───────────────────────────────────────────
+// ─── Função de envio via Evolution API ───────────────────
+
+function enviarWhatsApp(numero, texto) {
+  const EVOLUTION_URL = process.env.EVOLUTION_API_URL;
+  const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY;
+  const INSTANCE = process.env.EVOLUTION_INSTANCE || 'giovanni';
+
+  if (!EVOLUTION_URL || !EVOLUTION_KEY) {
+    console.log('[WhatsApp] Evolution API não configurada');
+    return;
+  }
+
+  const body = JSON.stringify({ number: numero, text: texto, options: { delay: 1200 } });
+  const url = new URL(`${EVOLUTION_URL}/message/sendText/${INSTANCE}`);
+  const lib = url.protocol === 'https:' ? https : http;
+
+  const req = lib.request({
+    hostname: url.hostname,
+    port: url.port || (url.protocol === 'https:' ? 443 : 80),
+    path: url.pathname,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'apikey': EVOLUTION_KEY,
+      'Content-Length': Buffer.byteLength(body)
+    },
+    rejectUnauthorized: false
+  }, res => {
+    let d = ''; res.on('data', c => d += c);
+    res.on('end', () => console.log(`[WhatsApp] Enviado para ${numero}:`, res.statusCode));
+  });
+  req.on('error', e => console.error('[WhatsApp] Erro envio:', e.message));
+  req.write(body); req.end();
+}
+
+// ─── Lógica central do bot ────────────────────────────────
+
+async function processarMensagem(message, sessionId, channel, phoneNumber) {
+  if (phoneNumber && atendidos.has(phoneNumber)) {
+    return { reply: null, atendido: true };
+  }
+
+  if (!sessions.has(sessionId)) {
+    sessions.set(sessionId, { history: [], lastActivity: Date.now(), channel, phoneNumber });
+
+    if (channel === 'whatsapp') {
+      sessions.get(sessionId).history.push({
+        role: 'assistant',
+        content: PRIMEIRA_MENSAGEM_WHATSAPP
+      });
+      return { reply: PRIMEIRA_MENSAGEM_WHATSAPP, sessionId, primeiraVez: true };
+    }
+  }
+
+  const session = sessions.get(sessionId);
+  session.lastActivity = Date.now();
+  session.history.push({ role: 'user', content: message });
+
+  if (session.history.length > 40) {
+    session.history = session.history.slice(-40);
+  }
+
+  const response = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 400,
+    system: buildSystemPrompt(session.channel, session.phoneNumber),
+    messages: session.history,
+  });
+
+  const reply = response.content[0].text;
+  session.history.push({ role: 'assistant', content: reply });
+
+  return { reply, sessionId };
+}
+
+// ─── POST /chat (site) ────────────────────────────────────
 app.post('/chat', async (req, res) => {
   try {
     const { message, sessionId, channel = 'site', phoneNumber = '' } = req.body;
     if (!message || !sessionId) {
       return res.status(400).json({ error: 'message e sessionId são obrigatórios' });
     }
-
-    // Se o número já foi atendido por ligação, bot não responde mais
-    if (phoneNumber && atendidos.has(phoneNumber)) {
-      return res.json({ reply: null, atendido: true });
-    }
-
-    if (!sessions.has(sessionId)) {
-      sessions.set(sessionId, { history: [], lastActivity: Date.now(), channel, phoneNumber });
-
-      // No WhatsApp, primeira mensagem do bot é sempre a apresentação padrão
-      if (channel === 'whatsapp') {
-        sessions.get(sessionId).history.push({
-          role: 'assistant',
-          content: PRIMEIRA_MENSAGEM_WHATSAPP
-        });
-        return res.json({ reply: PRIMEIRA_MENSAGEM_WHATSAPP, sessionId, primeiraVez: true });
-      }
-    }
-
-    const session = sessions.get(sessionId);
-    session.lastActivity = Date.now();
-    session.history.push({ role: 'user', content: message });
-
-    if (session.history.length > 40) {
-      session.history = session.history.slice(-40);
-    }
-
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 400,
-      system: buildSystemPrompt(session.channel, session.phoneNumber),
-      messages: session.history,
-    });
-
-    const reply = response.content[0].text;
-    session.history.push({ role: 'assistant', content: reply });
-
-    res.json({ reply, sessionId });
+    const result = await processarMensagem(message, sessionId, channel, phoneNumber);
+    res.json(result);
   } catch (err) {
     console.error('Erro Claude API:', err.message);
     res.status(500).json({ error: 'Erro interno. Tente novamente.' });
   }
 });
 
+// ─── POST /webhook/whatsapp (Evolution API) ───────────────
+app.post('/webhook/whatsapp', async (req, res) => {
+  res.sendStatus(200); // responde rápido para a Evolution API
+
+  try {
+    const { event, data } = req.body;
+
+    // Só processa mensagens recebidas (não as enviadas pelo bot)
+    if (event !== 'messages.upsert' || !data) return;
+    if (data.key?.fromMe) return;
+
+    // Extrai número e texto
+    const remoteJid = data.key?.remoteJid || '';
+    if (remoteJid.includes('@g.us')) return; // ignora grupos
+
+    const numero = remoteJid.replace('@s.whatsapp.net', '');
+    const texto =
+      data.message?.conversation ||
+      data.message?.extendedTextMessage?.text ||
+      data.message?.imageMessage?.caption ||
+      '';
+
+    if (!texto.trim()) return;
+
+    console.log(`[WhatsApp] Mensagem de ${numero}: ${texto}`);
+
+    // Usa o número como sessionId para manter o histórico por lead
+    const result = await processarMensagem(texto, `wa_${numero}`, 'whatsapp', numero);
+
+    if (result.reply) {
+      enviarWhatsApp(numero, result.reply);
+    }
+  } catch (err) {
+    console.error('[Webhook] Erro:', err.message);
+  }
+});
+
 // ─── POST /atendido ───────────────────────────────────────
-// Chamado após o Dr. Giovanni realizar a ligação com o lead
-// Body: { phoneNumber: "5531999991234" }
 app.post('/atendido', (req, res) => {
   const { phoneNumber } = req.body;
   if (!phoneNumber) return res.status(400).json({ error: 'phoneNumber obrigatório' });
