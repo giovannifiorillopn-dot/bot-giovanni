@@ -112,6 +112,14 @@ ENVIO DE MÍDIA (use apenas uma vez por conversa cada tag):
 - Nunca use as duas tags na mesma mensagem. Nunca mencione que vai enviar fotos/vídeo antes de usar a tag.
 ${canalInfo}
 
+PRIMEIRA MENSAGEM (quando não há histórico anterior):
+Se for a primeira vez que o lead entra em contato, responda assim:
+"Olá! 👋 Sou o assistente virtual do *Dr. Giovanni Fiorillo*, especialista em tricologia e transplante capilar.
+
+O Dr. Giovanni já foi notificado do seu contato e entrará em contato com você por ligação no WhatsApp em breve. 📱
+
+Enquanto isso, me conta uma coisa: o senhor já realizou a análise da sua área doadora com a *tricoscopia*?"
+
 SEU PAPEL:
 1. Recepcionar o lead pelo nome com simpatia e profissionalismo
 2. Coletar nome completo e cidade de preferência (e WhatsApp se for pelo site)
@@ -133,12 +141,6 @@ REGRAS IMPORTANTES:
 - Responda SEMPRE em português brasileiro`;
 }
 
-const PRIMEIRA_MENSAGEM_WHATSAPP = `Olá! 👋 Sou o assistente virtual do *Dr. Giovanni Fiorillo*, especialista em tricologia e transplante capilar.
-
-O Dr. Giovanni já foi notificado do seu contato e entrará em contato com você por ligação no WhatsApp em breve. 📱
-
-Enquanto isso, me conta uma coisa: o senhor já realizou a análise da sua área doadora com a *tricoscopia*?`;
-
 // ─── Lógica central do bot ────────────────────────────────
 
 async function processarMensagem(message, sessionId, channel, phoneNumber) {
@@ -148,14 +150,6 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
 
   if (!sessions.has(sessionId)) {
     sessions.set(sessionId, { history: [], lastActivity: Date.now(), channel, phoneNumber });
-
-    if (channel === 'whatsapp') {
-      sessions.get(sessionId).history.push({
-        role: 'assistant',
-        content: PRIMEIRA_MENSAGEM_WHATSAPP
-      });
-      return { reply: PRIMEIRA_MENSAGEM_WHATSAPP, sessionId, primeiraVez: true };
-    }
   }
 
   const session = sessions.get(sessionId);
