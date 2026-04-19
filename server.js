@@ -3,16 +3,7 @@ const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
 const path = require('path');
 const crypto = require('crypto');
-const QRCode = require('qrcode');
-const pino = require('pino');
-const fs = require('fs');
-
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason,
-} = require('@whiskeysockets/baileys');
+const https = require('https');
 
 const app = express();
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -23,9 +14,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 const sessions = new Map();
 const atendidos = new Set();
 
-let sock = null;
-let qrBase64 = null;
-let waStatus = 'disconnected'; // 'disconnected' | 'qr' | 'connected'
+const ZAPI_INSTANCE = process.env.ZAPI_INSTANCE || 'D58C616CC9F6B43FEA818D01';
+const ZAPI_TOKEN = process.env.ZAPI_TOKEN || '3F1E5AEC4B777172FB89667E5D6D48C0';
+const ZAPI_BASE = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}`;
 
 setInterval(() => {
   const limite = Date.now() - 2 * 60 * 60 * 1000;
@@ -33,6 +24,37 @@ setInterval(() => {
     if (session.lastActivity < limite) sessions.delete(id);
   }
 }, 30 * 60 * 1000);
+
+// ─── Z-API helpers ────────────────────────────────────────
+
+function zapiReq(method, endpoint, body) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const headers = { 'Client-Token': ZAPI_TOKEN };
+    if (data) {
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = Buffer.byteLength(data);
+    }
+    const opts = {
+      hostname: 'api.z-api.io',
+      path: `/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}${endpoint}`,
+      method,
+      headers,
+    };
+    const req = https.request(opts, res => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve({ raw: d }); } });
+    });
+    req.on('error', reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+async function enviarMensagem(phone, message) {
+  const clean = phone.replace(/\D/g, '');
+  return zapiReq('POST', '/send-text', { phone: clean, message });
+}
 
 // ─── Prompts ──────────────────────────────────────────────
 
@@ -82,92 +104,6 @@ O Dr. Giovanni já foi notificado do seu contato e entrará em contato com você
 
 Enquanto isso, me conta uma coisa: o senhor já realizou a análise da sua área doadora com a *tricoscopia*?`;
 
-// ─── WhatsApp via Baileys ─────────────────────────────────
-
-async function conectarWhatsApp() {
-  const AUTH_DIR = './baileys_auth';
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const { version } = await fetchLatestBaileysVersion();
-
-  console.log(`[WhatsApp] Iniciando com Baileys v${version.join('.')}`);
-
-  sock = makeWASocket({
-    version,
-    auth: state,
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: true,
-    browser: ['Bot Dr. Giovanni', 'Chrome', '120.0.0'],
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 60000,
-    keepAliveIntervalMs: 25000,
-    retryRequestDelayMs: 2000,
-  });
-
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    if (qr) {
-      waStatus = 'qr';
-      qrBase64 = await QRCode.toDataURL(qr);
-      console.log('[WhatsApp] QR code gerado. Acesse /qrcode para escanear.');
-    }
-
-    if (connection === 'open') {
-      waStatus = 'connected';
-      qrBase64 = null;
-      console.log('[WhatsApp] ✅ Conectado com sucesso!');
-    }
-
-    if (connection === 'close') {
-      waStatus = 'disconnected';
-      const code = lastDisconnect?.error?.output?.statusCode;
-      const loggedOut = code === DisconnectReason.loggedOut;
-      console.log(`[WhatsApp] Desconectado (código ${code}). Reconectar: ${!loggedOut}`);
-
-      if (loggedOut) {
-        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        console.log('[WhatsApp] Sessão apagada. Novo QR code em breve.');
-      }
-      setTimeout(conectarWhatsApp, 5000);
-    }
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
-    for (const msg of messages) {
-      if (msg.key.fromMe) continue;
-
-      const jid = msg.key.remoteJid || '';
-      if (jid.endsWith('@g.us')) continue; // ignora grupos
-
-      const texto =
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        msg.message?.imageMessage?.caption ||
-        '';
-
-      if (!texto.trim()) continue;
-
-      const numero = jid.split('@')[0];
-      console.log(`[WhatsApp] Mensagem de ${numero}: ${texto.slice(0, 80)}`);
-
-      try {
-        const result = await processarMensagem(texto, `wa_${jid}`, 'whatsapp', numero);
-        if (result.reply && sock) {
-          // Baileys envia direto para o JID original — suporta @lid nativamente
-          await sock.sendMessage(jid, { text: result.reply });
-          console.log(`[WhatsApp] Resposta enviada para ${numero}`);
-        }
-      } catch (e) {
-        console.error('[WhatsApp] Erro ao responder:', e.message);
-      }
-    }
-  });
-}
-
-conectarWhatsApp().catch(e => console.error('[WhatsApp] Falha ao iniciar:', e.message));
-
 // ─── Lógica central do bot ────────────────────────────────
 
 async function processarMensagem(message, sessionId, channel, phoneNumber) {
@@ -209,15 +145,53 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
 }
 
 // ─── GET /qrcode ──────────────────────────────────────────
-app.get('/qrcode', (req, res) => {
-  if (waStatus === 'connected') return res.json({ status: 'connected' });
-  if (!qrBase64) return res.json({ status: 'waiting' });
-  res.json({ status: 'qr', qr: qrBase64 });
+app.get('/qrcode', async (req, res) => {
+  try {
+    const status = await zapiReq('GET', '/status', null);
+    if (status.connected) return res.json({ status: 'connected' });
+
+    const qr = await zapiReq('GET', '/qr-code/image', null);
+    if (qr.value) return res.json({ status: 'qr', qr: 'data:image/png;base64,' + qr.value });
+
+    return res.json({ status: 'waiting' });
+  } catch (e) {
+    res.json({ status: 'error', message: e.message });
+  }
 });
 
 // ─── GET /wa-status ───────────────────────────────────────
-app.get('/wa-status', (req, res) => {
-  res.json({ status: waStatus });
+app.get('/wa-status', async (req, res) => {
+  try {
+    const status = await zapiReq('GET', '/status', null);
+    res.json({ status: status.connected ? 'connected' : 'disconnected' });
+  } catch (e) {
+    res.json({ status: 'disconnected' });
+  }
+});
+
+// ─── POST /webhook/zapi (mensagens recebidas) ─────────────
+app.post('/webhook/zapi', async (req, res) => {
+  res.sendStatus(200);
+  const body = req.body;
+
+  if (body.fromMe) return;
+  if (body.isGroup || body.isGroupMsg) return;
+
+  const phone = body.phone || body.from || '';
+  const texto = body.text?.message || body.image?.caption || '';
+  if (!phone || !texto.trim()) return;
+
+  console.log(`[Z-API] Mensagem de ${phone}: ${texto.slice(0, 80)}`);
+
+  try {
+    const result = await processarMensagem(texto, `wa_${phone}`, 'whatsapp', phone);
+    if (result.reply) {
+      await enviarMensagem(phone, result.reply);
+      console.log(`[Z-API] Resposta enviada para ${phone}`);
+    }
+  } catch (e) {
+    console.error('[Z-API] Erro ao responder:', e.message);
+  }
 });
 
 // ─── POST /chat (site) ────────────────────────────────────
@@ -254,9 +228,10 @@ app.get('/session', (req, res) => {
   res.json({ sessionId: crypto.randomUUID() });
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', wa: waStatus }));
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Bot do Dr. Giovanni rodando em http://localhost:${PORT}`);
+  console.log(`Z-API instance: ${ZAPI_INSTANCE}`);
 });
