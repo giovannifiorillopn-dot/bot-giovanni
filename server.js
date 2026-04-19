@@ -14,8 +14,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 const sessions = new Map();
 const atendidos = new Set();
 
-const ZAPI_INSTANCE = process.env.ZAPI_INSTANCE || 'D58C616CC9F6B43FEA818D01';
-const ZAPI_TOKEN = process.env.ZAPI_TOKEN || '3F1E5AEC4B777172FB89667E5D6D48C0';
+const ZAPI_INSTANCE = process.env.ZAPI_INSTANCE || '3F1E5AEC4B777172FB89667E5D6D48C0';
+const ZAPI_TOKEN = process.env.ZAPI_TOKEN || 'D58C616CC9F6B43FEA818D01';
+const ZAPI_CLIENT_TOKEN = process.env.ZAPI_CLIENT_TOKEN || 'Fd5068006066544898ed1d5606b9c7c35S';
 const ZAPI_BASE = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}`;
 
 setInterval(() => {
@@ -30,7 +31,7 @@ setInterval(() => {
 function zapiReq(method, endpoint, body) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
-    const headers = {};
+    const headers = { 'Client-Token': ZAPI_CLIENT_TOKEN };
     if (data) {
       headers['Content-Type'] = 'application/json';
       headers['Content-Length'] = Buffer.byteLength(data);
