@@ -57,6 +57,13 @@ async function enviarMensagem(phone, message) {
   return zapiReq('POST', '/send-text', { phone: clean, message });
 }
 
+async function enviarVideo(phone, videoUrl, caption) {
+  const clean = phone.replace(/\D/g, '');
+  return zapiReq('POST', '/send-video', { phone: clean, video: videoUrl, caption: caption || '' });
+}
+
+const VIDEO_TRICOSCOPIA = 'https://bot-giovanni-production.up.railway.app/tricoscopia.mp4';
+
 // ─── Prompts ──────────────────────────────────────────────
 
 function buildSystemPrompt(channel, phoneNumber) {
@@ -90,6 +97,10 @@ SOBRE O PROCEDIMENTO E VALORES:
 
 SOBRE A TRICOSCOPIA (use esse texto quando explicar):
 "O primeiro passo é realizar a análise da área doadora com a tricoscopia. Esse exame visualiza os fios e o couro cabeludo em tamanho aumentado, permitindo ao Dr. Giovanni montar o planejamento cirúrgico — definindo a técnica utilizada (FUE, BHT, entre outras) e a quantidade estimada de fios para cobertura da área."
+
+ENVIO DE VÍDEO:
+- Quando explicar a tricoscopia pela primeira vez, inclua exatamente ao final da sua mensagem: [VIDEO_TRICOSCOPIA]
+- Use apenas uma vez por conversa. Não inclua em outras situações.
 ${canalInfo}
 
 SEU PAPEL:
@@ -153,10 +164,17 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
     messages: session.history,
   });
 
-  const reply = response.content[0].text;
+  let reply = response.content[0].text;
+  let enviarVideoTricoscopia = false;
+
+  if (reply.includes('[VIDEO_TRICOSCOPIA]')) {
+    reply = reply.replace('[VIDEO_TRICOSCOPIA]', '').trim();
+    enviarVideoTricoscopia = true;
+  }
+
   session.history.push({ role: 'assistant', content: reply });
 
-  return { reply, sessionId };
+  return { reply, sessionId, enviarVideoTricoscopia };
 }
 
 // ─── GET /qrcode ──────────────────────────────────────────
@@ -203,6 +221,11 @@ app.post('/webhook/zapi', async (req, res) => {
     if (result.reply) {
       await enviarMensagem(phone, result.reply);
       console.log(`[Z-API] Resposta enviada para ${phone}`);
+    }
+    if (result.enviarVideoTricoscopia) {
+      await new Promise(r => setTimeout(r, 1500));
+      await enviarVideo(phone, VIDEO_TRICOSCOPIA, '');
+      console.log(`[Z-API] Vídeo tricoscopia enviado para ${phone}`);
     }
   } catch (e) {
     console.error('[Z-API] Erro ao responder:', e.message);
