@@ -162,35 +162,45 @@ app.post('/chat', async (req, res) => {
 
 // ─── POST /webhook/whatsapp (Evolution API) ───────────────
 app.post('/webhook/whatsapp', async (req, res) => {
-  res.sendStatus(200); // responde rápido para a Evolution API
+  res.sendStatus(200);
 
   try {
-    const { event, data } = req.body;
+    console.log('[Webhook] Recebido:', JSON.stringify(req.body).slice(0, 300));
 
-    // Só processa mensagens recebidas (não as enviadas pelo bot)
-    if (event !== 'messages.upsert' || !data) return;
-    if (data.key?.fromMe) return;
+    const body = req.body;
+    const event = body.event || body.type || '';
 
-    // Extrai número e texto
-    const remoteJid = data.key?.remoteJid || '';
-    if (remoteJid.includes('@g.us')) return; // ignora grupos
+    // Aceita tanto 'messages.upsert' quanto 'MESSAGES_UPSERT'
+    const isMessage = event.toLowerCase().includes('messages') && event.toLowerCase().includes('upsert');
+    if (!isMessage) return;
 
-    const numero = remoteJid.replace('@s.whatsapp.net', '');
-    const texto =
-      data.message?.conversation ||
-      data.message?.extendedTextMessage?.text ||
-      data.message?.imageMessage?.caption ||
-      '';
+    // data pode ser objeto ou array (depende da versão da Evolution API)
+    const rawData = body.data;
+    const items = Array.isArray(rawData) ? rawData : [rawData];
 
-    if (!texto.trim()) return;
+    for (const data of items) {
+      if (!data || !data.key) continue;
+      if (data.key.fromMe) continue;
 
-    console.log(`[WhatsApp] Mensagem de ${numero}: ${texto}`);
+      const remoteJid = data.key.remoteJid || '';
+      if (remoteJid.includes('@g.us')) continue; // ignora grupos
 
-    // Usa o número como sessionId para manter o histórico por lead
-    const result = await processarMensagem(texto, `wa_${numero}`, 'whatsapp', numero);
+      const numero = remoteJid.replace('@s.whatsapp.net', '');
+      const texto =
+        data.message?.conversation ||
+        data.message?.extendedTextMessage?.text ||
+        data.message?.imageMessage?.caption ||
+        data.body || // alguns formatos usam data.body
+        '';
 
-    if (result.reply) {
-      enviarWhatsApp(numero, result.reply);
+      if (!texto.trim()) continue;
+
+      console.log(`[WhatsApp] Mensagem de ${numero}: ${texto}`);
+
+      const result = await processarMensagem(texto, `wa_${numero}`, 'whatsapp', numero);
+      if (result.reply) {
+        enviarWhatsApp(numero, result.reply);
+      }
     }
   } catch (err) {
     console.error('[Webhook] Erro:', err.message);
