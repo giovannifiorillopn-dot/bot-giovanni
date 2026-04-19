@@ -13,8 +13,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const sessions = new Map();
 const atendidos = new Set();
-const agendamentos = new Map(); // phone → { nome, cidade, turno }
-const lembretesEnviados = new Set(); // 'YYYY-MM-DD_turno' — evita reenvio
+const agendamentos = new Map(); // phone → { nome, cidade, turno, dataStr }
+const lembretesEnviados = new Set(); // 'YYYY-MM-DD_turno'
 
 const ZAPI_INSTANCE = process.env.ZAPI_INSTANCE || '3F1E5AEC4B777172FB89667E5D6D48C0';
 const ZAPI_TOKEN = process.env.ZAPI_TOKEN || 'D58C616CC9F6B43FEA818D01';
@@ -22,10 +22,12 @@ const ZAPI_CLIENT_TOKEN = process.env.ZAPI_CLIENT_TOKEN || 'Fd5068006066544898ed
 const DR_PHONE = process.env.DR_PHONE || '5531971900140';
 
 const TURNOS = {
-  manha:  { label: 'Manhã (09:00 – 10:00)',   lembrete: { h: 8,  m: 40 } },
-  tarde:  { label: 'Tarde (14:00 – 15:00)',    lembrete: { h: 13, m: 40 } },
-  noite:  { label: 'Noite (19:00 – 20:00)',    lembrete: { h: 18, m: 40 } },
+  manha:  { label: 'Manhã (09:00 – 10:00)',  inicio: 9,  lembrete: { h: 8,  m: 40 } },
+  tarde:  { label: 'Tarde (14:00 – 15:00)',  inicio: 14, lembrete: { h: 13, m: 40 } },
+  noite:  { label: 'Noite (19:00 – 20:00)',  inicio: 19, lembrete: { h: 18, m: 40 } },
 };
+
+const DIAS_PT = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
 
 // ─── Sessões expiradas ────────────────────────────────────
 setInterval(() => {
@@ -81,21 +83,53 @@ const FOTOS_RESULTADOS = Array.from({length: 9}, (_, i) =>
   `https://bot-giovanni-production.up.railway.app/resultado${i+1}.jpg`
 );
 
-// ─── Lembrete 20 min antes de cada turno ─────────────────
+// ─── Timezone BRT (UTC-3) ─────────────────────────────────
 
 function getBRT() {
-  // Railway roda em UTC; Brasil é UTC-3
   return new Date(Date.now() - 3 * 60 * 60 * 1000);
 }
+
+// Retorna { label, dataStr } para o próximo slot disponível de um turno
+function proximoSlot(turno) {
+  const brt = getBRT();
+  const diaAtual = brt.getUTCDay();   // 0=Dom … 6=Sab
+  const horaAtual = brt.getUTCHours();
+  const ehDiaUtil = diaAtual >= 1 && diaAtual <= 5;
+  const slotAindaNaoPassou = horaAtual < TURNOS[turno].inicio;
+
+  let diasAdicionar = 0;
+  if (!ehDiaUtil || !slotAindaNaoPassou) {
+    diasAdicionar = 1;
+    let proximoDia = (diaAtual + diasAdicionar) % 7;
+    while (proximoDia === 0 || proximoDia === 6) {
+      diasAdicionar++;
+      proximoDia = (diaAtual + diasAdicionar) % 7;
+    }
+  }
+
+  const dataFinal = new Date(brt.getTime() + diasAdicionar * 24 * 60 * 60 * 1000);
+  const d   = String(dataFinal.getUTCDate()).padStart(2, '0');
+  const mes = String(dataFinal.getUTCMonth() + 1).padStart(2, '0');
+  const ano = dataFinal.getUTCFullYear();
+  const nomeDia = DIAS_PT[dataFinal.getUTCDay()];
+  const dataStr = `${ano}-${mes}-${d}`;          // para uso interno
+  const label   = `${nomeDia}, ${d}/${mes}`;     // para o Claude
+
+  return { label, dataStr };
+}
+
+// ─── Lembrete 20 min antes de cada turno ─────────────────
 
 async function enviarLembreteTurno(turno, dateStr) {
   const pendentes = [];
   for (const [phone, ag] of agendamentos) {
-    if (ag.turno === turno) pendentes.push({ phone, ...ag });
+    if (ag.turno === turno && ag.dataStr === dateStr) {
+      pendentes.push({ phone, ...ag });
+    }
   }
 
   if (pendentes.length === 0) {
-    console.log(`[Lembrete] Nenhum agendado para o turno ${turno} de ${dateStr}`);
+    console.log(`[Lembrete] Nenhum agendado: turno ${turno} / ${dateStr}`);
     return;
   }
 
@@ -109,12 +143,12 @@ async function enviarLembreteTurno(turno, dateStr) {
     `_Assistente virtual Dr. Giovanni_`;
 
   await enviarMensagem(DR_PHONE, msg);
-  console.log(`[Lembrete] Enviado para Dr. Giovanni — turno ${turno} — ${pendentes.length} lead(s)`);
+  console.log(`[Lembrete] Enviado — turno ${turno} — ${pendentes.length} lead(s)`);
 }
 
 setInterval(() => {
   const brt = getBRT();
-  const diaSemana = brt.getUTCDay(); // 0=Dom, 6=Sab
+  const diaSemana = brt.getUTCDay();
   if (diaSemana === 0 || diaSemana === 6) return;
 
   const h = brt.getUTCHours();
@@ -123,11 +157,10 @@ setInterval(() => {
 
   for (const [turno, cfg] of Object.entries(TURNOS)) {
     const key = `${dateStr}_${turno}`;
-    // janela de 2 minutos para absorver drift do setInterval
     if (h === cfg.lembrete.h && m >= cfg.lembrete.m && m < cfg.lembrete.m + 2 && !lembretesEnviados.has(key)) {
       lembretesEnviados.add(key);
       enviarLembreteTurno(turno, dateStr).catch(e =>
-        console.error(`[Lembrete] Erro ao enviar turno ${turno}:`, e.message)
+        console.error(`[Lembrete] Erro turno ${turno}:`, e.message)
       );
     }
   }
@@ -139,6 +172,10 @@ function buildSystemPrompt(channel, phoneNumber) {
   const canalInfo = channel === 'whatsapp'
     ? `\nCANAL: WhatsApp. O número do lead já é conhecido (${phoneNumber}). NÃO peça o WhatsApp. Colete apenas nome completo e cidade de preferência (Ponte Nova ou Mariana).`
     : `\nCANAL: Site. Colete nome completo, WhatsApp e cidade de preferência (Ponte Nova ou Mariana).`;
+
+  const slotManha = proximoSlot('manha');
+  const slotTarde = proximoSlot('tarde');
+  const slotNoite = proximoSlot('noite');
 
   return `Você é o assistente virtual do Dr. Giovanni Fiorillo, especialista em tricologia e transplante capilar. Você representa a clínica com simpatia, profissionalismo e linguagem acolhedora. Sempre chame o lead pelo primeiro nome.
 
@@ -174,20 +211,21 @@ ENVIO DE MÍDIA (use apenas uma vez por conversa cada tag):
 ${canalInfo}
 
 AGENDAMENTO DA LIGAÇÃO:
-Após coletar o nome completo e a cidade do lead, pergunte qual faixa de horário fica melhor para receber a ligação do Dr. Giovanni. Os turnos disponíveis são de segunda a sexta-feira:
-  - 1️⃣ Manhã — das 09:00 às 10:00
-  - 2️⃣ Tarde — das 14:00 às 15:00
-  - 3️⃣ Noite — das 19:00 às 20:00
+Após coletar o nome completo e a cidade do lead, pergunte qual faixa de horário fica melhor para receber a ligação do Dr. Giovanni. Apresente os turnos com as DATAS EXATAS abaixo:
 
-Quando o lead confirmar um turno, escreva uma mensagem de confirmação calorosa e inclua no FINAL da mensagem (invisível para o lead) a tag:
+  - 1️⃣ *Manhã* — ${slotManha.label}, das 09:00 às 10:00
+  - 2️⃣ *Tarde* — ${slotTarde.label}, das 14:00 às 15:00
+  - 3️⃣ *Noite* — ${slotNoite.label}, das 19:00 às 20:00
+
+Quando o lead confirmar um turno, escreva uma mensagem de confirmação calorosa mencionando o DIA e HORÁRIO exatos (use os dados acima). Ao final da mensagem inclua a tag:
 [AGENDADO:turno:nome completo:cidade]
 
-Onde "turno" é exatamente uma das palavras: manha | tarde | noite
+Onde "turno" é exatamente uma dessas palavras: manha | tarde | noite
 
 Exemplos:
-- Se escolheu manhã: [AGENDADO:manha:Carlos Oliveira:Ponte Nova]
-- Se escolheu tarde: [AGENDADO:tarde:Ana Lima:Mariana]
-- Se escolheu noite: [AGENDADO:noite:José Santos:Ponte Nova]
+- Manhã confirmada: [AGENDADO:manha:Carlos Oliveira:Ponte Nova]
+- Tarde confirmada: [AGENDADO:tarde:Ana Lima:Mariana]
+- Noite confirmada: [AGENDADO:noite:José Santos:Ponte Nova]
 
 Use a tag UMA ÚNICA VEZ por conversa, apenas no momento da confirmação. Nunca repita.
 
@@ -243,6 +281,7 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
 
   let reply = response.content[0].text;
   let enviarVideoTricoscopia = false;
+  let enviarFotosResultados = false;
   let agendado = null;
 
   if (reply.includes('[VIDEO_TRICOSCOPIA]')) {
@@ -250,7 +289,6 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
     enviarVideoTricoscopia = true;
   }
 
-  let enviarFotosResultados = false;
   if (reply.includes('[FOTOS_RESULTADOS]')) {
     reply = reply.replace('[FOTOS_RESULTADOS]', '').trim();
     enviarFotosResultados = true;
@@ -261,7 +299,8 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
     const [fullTag, turno, nome, cidade] = matchAgendado;
     reply = reply.replace(fullTag, '').trim();
     if (TURNOS[turno]) {
-      agendado = { turno, nome: nome.trim(), cidade: cidade.trim() };
+      const { dataStr } = proximoSlot(turno);
+      agendado = { turno, nome: nome.trim(), cidade: cidade.trim(), dataStr };
     }
   }
 
@@ -275,10 +314,8 @@ app.get('/qrcode', async (req, res) => {
   try {
     const status = await zapiReq('GET', '/status', null);
     if (status.connected) return res.json({ status: 'connected' });
-
     const qr = await zapiReq('GET', '/qr-code/image', null);
     if (qr.value) return res.json({ status: 'qr', qr: 'data:image/png;base64,' + qr.value });
-
     return res.json({ status: 'waiting' });
   } catch (e) {
     res.json({ status: 'error', message: e.message });
@@ -318,9 +355,9 @@ app.post('/webhook/zapi', async (req, res) => {
     }
 
     if (result.agendado) {
-      const { turno, nome, cidade } = result.agendado;
-      agendamentos.set(phone, { nome, cidade, turno });
-      console.log(`[Agendamento] ${nome} (${cidade}) — turno ${turno} — ${phone}`);
+      const { turno, nome, cidade, dataStr } = result.agendado;
+      agendamentos.set(phone, { nome, cidade, turno, dataStr });
+      console.log(`[Agendamento] ${nome} (${cidade}) — ${turno} ${dataStr} — ${phone}`);
     }
 
     if (result.enviarVideoTricoscopia) {
@@ -362,7 +399,7 @@ app.post('/atendido', (req, res) => {
   const { phoneNumber } = req.body;
   if (!phoneNumber) return res.status(400).json({ error: 'phoneNumber obrigatório' });
   atendidos.add(phoneNumber);
-  agendamentos.delete(phoneNumber); // remove da fila de ligações
+  agendamentos.delete(phoneNumber);
   console.log(`Lead ${phoneNumber} marcado como atendido.`);
   res.json({ ok: true, phoneNumber });
 });
@@ -374,16 +411,12 @@ app.get('/atendidos', (req, res) => {
 
 // ─── GET /agendamentos ────────────────────────────────────
 app.get('/agendamentos', (req, res) => {
-  const lista = [];
-  for (const [phone, ag] of agendamentos) {
-    lista.push({ phone, ...ag });
-  }
-  // agrupa por turno
   const por_turno = { manha: [], tarde: [], noite: [] };
-  for (const ag of lista) {
-    if (por_turno[ag.turno]) por_turno[ag.turno].push(ag);
+  for (const [phone, ag] of agendamentos) {
+    if (por_turno[ag.turno]) por_turno[ag.turno].push({ phone, ...ag });
   }
-  res.json({ total: lista.length, por_turno });
+  const total = agendamentos.size;
+  res.json({ total, por_turno });
 });
 
 // ─── GET /session ─────────────────────────────────────────
