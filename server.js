@@ -1,10 +1,18 @@
 require('dotenv').config();
 const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
-const https = require('https');
-const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
+const QRCode = require('qrcode');
+const pino = require('pino');
+const fs = require('fs');
+
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason,
+} = require('@whiskeysockets/baileys');
 
 const app = express();
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -14,6 +22,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const sessions = new Map();
 const atendidos = new Set();
+
+let sock = null;
+let qrBase64 = null;
+let waStatus = 'disconnected'; // 'disconnected' | 'qr' | 'connected'
 
 setInterval(() => {
   const limite = Date.now() - 2 * 60 * 60 * 1000;
@@ -70,40 +82,91 @@ O Dr. Giovanni já foi notificado do seu contato e entrará em contato com você
 
 Enquanto isso, me conta uma coisa: o senhor já realizou a análise da sua área doadora com a *tricoscopia*?`;
 
-// ─── Função de envio via Evolution API ───────────────────
+// ─── WhatsApp via Baileys ─────────────────────────────────
 
-function enviarWhatsApp(numero, texto) {
-  const EVOLUTION_URL = process.env.EVOLUTION_API_URL;
-  const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY;
-  const INSTANCE = process.env.EVOLUTION_INSTANCE || 'giovanni';
+async function conectarWhatsApp() {
+  const AUTH_DIR = './baileys_auth';
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { version } = await fetchLatestBaileysVersion();
 
-  if (!EVOLUTION_URL || !EVOLUTION_KEY) {
-    console.log('[WhatsApp] Evolution API não configurada');
-    return;
-  }
+  console.log(`[WhatsApp] Iniciando com Baileys v${version.join('.')}`);
 
-  const body = JSON.stringify({ number: numero, textMessage: { text: texto }, options: { delay: 1200 } });
-  const url = new URL(`${EVOLUTION_URL}/message/sendText/${INSTANCE}`);
-  const lib = url.protocol === 'https:' ? https : http;
-
-  const req = lib.request({
-    hostname: url.hostname,
-    port: url.port || (url.protocol === 'https:' ? 443 : 80),
-    path: url.pathname,
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'apikey': EVOLUTION_KEY,
-      'Content-Length': Buffer.byteLength(body)
-    },
-    rejectUnauthorized: false
-  }, res => {
-    let d = ''; res.on('data', c => d += c);
-    res.on('end', () => console.log(`[WhatsApp] Enviado para ${numero}:`, res.statusCode));
+  sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: true,
+    browser: ['Bot Dr. Giovanni', 'Chrome', '120.0.0'],
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
+    retryRequestDelayMs: 2000,
   });
-  req.on('error', e => console.error('[WhatsApp] Erro envio:', e.message));
-  req.write(body); req.end();
+
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      waStatus = 'qr';
+      qrBase64 = await QRCode.toDataURL(qr);
+      console.log('[WhatsApp] QR code gerado. Acesse /qrcode para escanear.');
+    }
+
+    if (connection === 'open') {
+      waStatus = 'connected';
+      qrBase64 = null;
+      console.log('[WhatsApp] ✅ Conectado com sucesso!');
+    }
+
+    if (connection === 'close') {
+      waStatus = 'disconnected';
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const loggedOut = code === DisconnectReason.loggedOut;
+      console.log(`[WhatsApp] Desconectado (código ${code}). Reconectar: ${!loggedOut}`);
+
+      if (loggedOut) {
+        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        console.log('[WhatsApp] Sessão apagada. Novo QR code em breve.');
+      }
+      setTimeout(conectarWhatsApp, 5000);
+    }
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      if (msg.key.fromMe) continue;
+
+      const jid = msg.key.remoteJid || '';
+      if (jid.endsWith('@g.us')) continue; // ignora grupos
+
+      const texto =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption ||
+        '';
+
+      if (!texto.trim()) continue;
+
+      const numero = jid.split('@')[0];
+      console.log(`[WhatsApp] Mensagem de ${numero}: ${texto.slice(0, 80)}`);
+
+      try {
+        const result = await processarMensagem(texto, `wa_${jid}`, 'whatsapp', numero);
+        if (result.reply && sock) {
+          // Baileys envia direto para o JID original — suporta @lid nativamente
+          await sock.sendMessage(jid, { text: result.reply });
+          console.log(`[WhatsApp] Resposta enviada para ${numero}`);
+        }
+      } catch (e) {
+        console.error('[WhatsApp] Erro ao responder:', e.message);
+      }
+    }
+  });
 }
+
+conectarWhatsApp().catch(e => console.error('[WhatsApp] Falha ao iniciar:', e.message));
 
 // ─── Lógica central do bot ────────────────────────────────
 
@@ -145,6 +208,18 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
   return { reply, sessionId };
 }
 
+// ─── GET /qrcode ──────────────────────────────────────────
+app.get('/qrcode', (req, res) => {
+  if (waStatus === 'connected') return res.json({ status: 'connected' });
+  if (!qrBase64) return res.json({ status: 'waiting' });
+  res.json({ status: 'qr', qr: qrBase64 });
+});
+
+// ─── GET /wa-status ───────────────────────────────────────
+app.get('/wa-status', (req, res) => {
+  res.json({ status: waStatus });
+});
+
 // ─── POST /chat (site) ────────────────────────────────────
 app.post('/chat', async (req, res) => {
   try {
@@ -160,63 +235,12 @@ app.post('/chat', async (req, res) => {
   }
 });
 
-// ─── POST /webhook/whatsapp (Evolution API) ───────────────
-app.post('/webhook/whatsapp', async (req, res) => {
-  res.sendStatus(200);
-
-  try {
-    console.log('[Webhook] Recebido:', JSON.stringify(req.body).slice(0, 300));
-
-    const body = req.body;
-    const event = body.event || body.type || '';
-
-    // Aceita tanto 'messages.upsert' quanto 'MESSAGES_UPSERT'
-    const isMessage = event.toLowerCase().includes('messages') && event.toLowerCase().includes('upsert');
-    if (!isMessage) return;
-
-    // data pode ser objeto ou array (depende da versão da Evolution API)
-    const rawData = body.data;
-    const items = Array.isArray(rawData) ? rawData : [rawData];
-
-    for (const data of items) {
-      if (!data || !data.key) continue;
-      if (data.key.fromMe) continue;
-
-      const remoteJid = data.key.remoteJid || '';
-      if (remoteJid.includes('@g.us')) continue; // ignora grupos
-
-      // Suporta @s.whatsapp.net e @lid (formato novo WhatsApp)
-      // @lid é formato novo do WhatsApp — extrai só dígitos para envio e sessão
-      const numero = remoteJid.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '');
-      const texto =
-        data.message?.conversation ||
-        data.message?.extendedTextMessage?.text ||
-        data.message?.imageMessage?.caption ||
-        data.body ||
-        '';
-
-      if (!texto.trim()) continue;
-
-      console.log(`[WhatsApp] Mensagem de ${numero} (${remoteJid}): ${texto}`);
-
-      const result = await processarMensagem(texto, `wa_${numero}`, 'whatsapp', numero);
-      if (result.reply) {
-        // Sempre envia com @s.whatsapp.net — Evolution API v1 não suporta @lid
-        const jidEnvio = numero + '@s.whatsapp.net';
-        enviarWhatsApp(jidEnvio, result.reply);
-      }
-    }
-  } catch (err) {
-    console.error('[Webhook] Erro:', err.message);
-  }
-});
-
 // ─── POST /atendido ───────────────────────────────────────
 app.post('/atendido', (req, res) => {
   const { phoneNumber } = req.body;
   if (!phoneNumber) return res.status(400).json({ error: 'phoneNumber obrigatório' });
   atendidos.add(phoneNumber);
-  console.log(`Lead ${phoneNumber} marcado como atendido. Bot não responderá mais.`);
+  console.log(`Lead ${phoneNumber} marcado como atendido.`);
   res.json({ ok: true, phoneNumber });
 });
 
@@ -230,7 +254,7 @@ app.get('/session', (req, res) => {
   res.json({ sessionId: crypto.randomUUID() });
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', wa: waStatus }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
