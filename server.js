@@ -30,7 +30,7 @@ setInterval(() => {
 function zapiReq(method, endpoint, body) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
-    const headers = { 'Client-Token': ZAPI_TOKEN };
+    const headers = {};
     if (data) {
       headers['Content-Type'] = 'application/json';
       headers['Content-Length'] = Buffer.byteLength(data);
