@@ -13,12 +13,21 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const sessions = new Map();
 const atendidos = new Set();
+const agendamentos = new Map(); // phone → { nome, cidade, turno }
+const lembretesEnviados = new Set(); // 'YYYY-MM-DD_turno' — evita reenvio
 
 const ZAPI_INSTANCE = process.env.ZAPI_INSTANCE || '3F1E5AEC4B777172FB89667E5D6D48C0';
 const ZAPI_TOKEN = process.env.ZAPI_TOKEN || 'D58C616CC9F6B43FEA818D01';
 const ZAPI_CLIENT_TOKEN = process.env.ZAPI_CLIENT_TOKEN || 'Fd5068006066544898ed1d5606b9c7c35S';
-const ZAPI_BASE = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}`;
+const DR_PHONE = process.env.DR_PHONE || '5531971900140';
 
+const TURNOS = {
+  manha:  { label: 'Manhã (09:00 – 10:00)',   lembrete: { h: 8,  m: 40 } },
+  tarde:  { label: 'Tarde (14:00 – 15:00)',    lembrete: { h: 13, m: 40 } },
+  noite:  { label: 'Noite (19:00 – 20:00)',    lembrete: { h: 18, m: 40 } },
+};
+
+// ─── Sessões expiradas ────────────────────────────────────
 setInterval(() => {
   const limite = Date.now() - 2 * 60 * 60 * 1000;
   for (const [id, session] of sessions) {
@@ -72,6 +81,58 @@ const FOTOS_RESULTADOS = Array.from({length: 9}, (_, i) =>
   `https://bot-giovanni-production.up.railway.app/resultado${i+1}.jpg`
 );
 
+// ─── Lembrete 20 min antes de cada turno ─────────────────
+
+function getBRT() {
+  // Railway roda em UTC; Brasil é UTC-3
+  return new Date(Date.now() - 3 * 60 * 60 * 1000);
+}
+
+async function enviarLembreteTurno(turno, dateStr) {
+  const pendentes = [];
+  for (const [phone, ag] of agendamentos) {
+    if (ag.turno === turno) pendentes.push({ phone, ...ag });
+  }
+
+  if (pendentes.length === 0) {
+    console.log(`[Lembrete] Nenhum agendado para o turno ${turno} de ${dateStr}`);
+    return;
+  }
+
+  const lista = pendentes.map((a, i) =>
+    `${i + 1}. *${a.nome}* — ${a.cidade} — ${a.phone}`
+  ).join('\n');
+
+  const msg =
+    `⏰ *Lembrete de ligações — ${TURNOS[turno].label}*\n\n` +
+    `Leads para ligar agora:\n\n${lista}\n\n` +
+    `_Assistente virtual Dr. Giovanni_`;
+
+  await enviarMensagem(DR_PHONE, msg);
+  console.log(`[Lembrete] Enviado para Dr. Giovanni — turno ${turno} — ${pendentes.length} lead(s)`);
+}
+
+setInterval(() => {
+  const brt = getBRT();
+  const diaSemana = brt.getUTCDay(); // 0=Dom, 6=Sab
+  if (diaSemana === 0 || diaSemana === 6) return;
+
+  const h = brt.getUTCHours();
+  const m = brt.getUTCMinutes();
+  const dateStr = brt.toISOString().slice(0, 10);
+
+  for (const [turno, cfg] of Object.entries(TURNOS)) {
+    const key = `${dateStr}_${turno}`;
+    // janela de 2 minutos para absorver drift do setInterval
+    if (h === cfg.lembrete.h && m >= cfg.lembrete.m && m < cfg.lembrete.m + 2 && !lembretesEnviados.has(key)) {
+      lembretesEnviados.add(key);
+      enviarLembreteTurno(turno, dateStr).catch(e =>
+        console.error(`[Lembrete] Erro ao enviar turno ${turno}:`, e.message)
+      );
+    }
+  }
+}, 30 * 1000);
+
 // ─── Prompts ──────────────────────────────────────────────
 
 function buildSystemPrompt(channel, phoneNumber) {
@@ -112,6 +173,24 @@ ENVIO DE MÍDIA (use apenas uma vez por conversa cada tag):
 - Nunca use as duas tags na mesma mensagem. Nunca mencione que vai enviar fotos/vídeo antes de usar a tag.
 ${canalInfo}
 
+AGENDAMENTO DA LIGAÇÃO:
+Após coletar o nome completo e a cidade do lead, pergunte qual faixa de horário fica melhor para receber a ligação do Dr. Giovanni. Os turnos disponíveis são de segunda a sexta-feira:
+  - 1️⃣ Manhã — das 09:00 às 10:00
+  - 2️⃣ Tarde — das 14:00 às 15:00
+  - 3️⃣ Noite — das 19:00 às 20:00
+
+Quando o lead confirmar um turno, escreva uma mensagem de confirmação calorosa e inclua no FINAL da mensagem (invisível para o lead) a tag:
+[AGENDADO:turno:nome completo:cidade]
+
+Onde "turno" é exatamente uma das palavras: manha | tarde | noite
+
+Exemplos:
+- Se escolheu manhã: [AGENDADO:manha:Carlos Oliveira:Ponte Nova]
+- Se escolheu tarde: [AGENDADO:tarde:Ana Lima:Mariana]
+- Se escolheu noite: [AGENDADO:noite:José Santos:Ponte Nova]
+
+Use a tag UMA ÚNICA VEZ por conversa, apenas no momento da confirmação. Nunca repita.
+
 PRIMEIRA MENSAGEM (quando não há histórico anterior):
 Se for a primeira vez que o lead entra em contato, responda assim:
 "Olá! 👋 Sou o assistente virtual do *Dr. Giovanni Fiorillo*, especialista em tricologia e transplante capilar.
@@ -121,22 +200,17 @@ O Dr. Giovanni já foi notificado do seu contato e entrará em contato com você
 Enquanto isso, me conta uma coisa: o senhor já realizou a análise da sua área doadora com a *tricoscopia*?"
 
 SEU PAPEL:
-1. Recepcionar o lead pelo nome com simpatia e profissionalismo
+1. Recepcionar o lead com simpatia e profissionalismo
 2. Coletar nome completo e cidade de preferência (e WhatsApp se for pelo site)
-3. Informar que o Dr. Giovanni entrará em contato por ligação no WhatsApp em breve
-4. ENQUANTO O DR. AINDA NÃO LIGOU: engajar o lead com perguntas sobre sua situação capilar:
-   - Pergunte se ele já realizou a tricoscopia (análise da área doadora)
-   - Pergunte há quanto tempo percebe a queda
-   - Pergunte como está a situação atual (início, área considerável, calvície avançada)
-   - Se ele nunca fez tricoscopia, explique a importância usando o texto acima
-5. Mantenha a conversa aquecida e o lead engajado até o Dr. Giovanni realizar a ligação
+3. Engajar o lead com perguntas sobre sua situação capilar
+4. Perguntar e confirmar o turno de preferência para a ligação
+5. Manter a conversa aquecida até o Dr. Giovanni ligar
 
 REGRAS IMPORTANTES:
 - Seja objetivo e acolhedor. Máximo 3-4 frases por resposta
 - Chame sempre pelo primeiro nome
 - Não invente informações médicas — se não souber, diga que o Dr. Giovanni esclarecerá na ligação
 - Nunca mencione valores, preços ou estimativas de custo (consulta ou procedimento)
-- Não marque horários — o agendamento é feito pela equipe após a ligação do Dr.
 - Atendimento é particular; pode emitir nota para reembolso em convênio (se perguntarem)
 - Responda SEMPRE em português brasileiro`;
 }
@@ -162,13 +236,14 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
 
   const response = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 400,
+    max_tokens: 500,
     system: buildSystemPrompt(session.channel, session.phoneNumber),
     messages: session.history,
   });
 
   let reply = response.content[0].text;
   let enviarVideoTricoscopia = false;
+  let agendado = null;
 
   if (reply.includes('[VIDEO_TRICOSCOPIA]')) {
     reply = reply.replace('[VIDEO_TRICOSCOPIA]', '').trim();
@@ -181,9 +256,18 @@ async function processarMensagem(message, sessionId, channel, phoneNumber) {
     enviarFotosResultados = true;
   }
 
+  const matchAgendado = reply.match(/\[AGENDADO:([^:]+):([^:]+):([^\]]+)\]/);
+  if (matchAgendado) {
+    const [fullTag, turno, nome, cidade] = matchAgendado;
+    reply = reply.replace(fullTag, '').trim();
+    if (TURNOS[turno]) {
+      agendado = { turno, nome: nome.trim(), cidade: cidade.trim() };
+    }
+  }
+
   session.history.push({ role: 'assistant', content: reply });
 
-  return { reply, sessionId, enviarVideoTricoscopia, enviarFotosResultados };
+  return { reply, sessionId, enviarVideoTricoscopia, enviarFotosResultados, agendado };
 }
 
 // ─── GET /qrcode ──────────────────────────────────────────
@@ -227,15 +311,24 @@ app.post('/webhook/zapi', async (req, res) => {
 
   try {
     const result = await processarMensagem(texto, `wa_${phone}`, 'whatsapp', phone);
+
     if (result.reply) {
       await enviarMensagem(phone, result.reply);
       console.log(`[Z-API] Resposta enviada para ${phone}`);
     }
+
+    if (result.agendado) {
+      const { turno, nome, cidade } = result.agendado;
+      agendamentos.set(phone, { nome, cidade, turno });
+      console.log(`[Agendamento] ${nome} (${cidade}) — turno ${turno} — ${phone}`);
+    }
+
     if (result.enviarVideoTricoscopia) {
       await new Promise(r => setTimeout(r, 1500));
       await enviarVideo(phone, VIDEO_TRICOSCOPIA, '');
       console.log(`[Z-API] Vídeo tricoscopia enviado para ${phone}`);
     }
+
     if (result.enviarFotosResultados) {
       for (let i = 0; i < FOTOS_RESULTADOS.length; i++) {
         await new Promise(r => setTimeout(r, 1000));
@@ -269,6 +362,7 @@ app.post('/atendido', (req, res) => {
   const { phoneNumber } = req.body;
   if (!phoneNumber) return res.status(400).json({ error: 'phoneNumber obrigatório' });
   atendidos.add(phoneNumber);
+  agendamentos.delete(phoneNumber); // remove da fila de ligações
   console.log(`Lead ${phoneNumber} marcado como atendido.`);
   res.json({ ok: true, phoneNumber });
 });
@@ -276,6 +370,20 @@ app.post('/atendido', (req, res) => {
 // ─── GET /atendidos ───────────────────────────────────────
 app.get('/atendidos', (req, res) => {
   res.json({ atendidos: [...atendidos] });
+});
+
+// ─── GET /agendamentos ────────────────────────────────────
+app.get('/agendamentos', (req, res) => {
+  const lista = [];
+  for (const [phone, ag] of agendamentos) {
+    lista.push({ phone, ...ag });
+  }
+  // agrupa por turno
+  const por_turno = { manha: [], tarde: [], noite: [] };
+  for (const ag of lista) {
+    if (por_turno[ag.turno]) por_turno[ag.turno].push(ag);
+  }
+  res.json({ total: lista.length, por_turno });
 });
 
 // ─── GET /session ─────────────────────────────────────────
