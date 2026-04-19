@@ -185,21 +185,23 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const remoteJid = data.key.remoteJid || '';
       if (remoteJid.includes('@g.us')) continue; // ignora grupos
 
-      const numero = remoteJid.replace('@s.whatsapp.net', '');
+      // Suporta @s.whatsapp.net e @lid (formato novo WhatsApp)
+      const numero = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '');
       const texto =
         data.message?.conversation ||
         data.message?.extendedTextMessage?.text ||
         data.message?.imageMessage?.caption ||
-        data.body || // alguns formatos usam data.body
+        data.body ||
         '';
 
       if (!texto.trim()) continue;
 
-      console.log(`[WhatsApp] Mensagem de ${numero}: ${texto}`);
+      console.log(`[WhatsApp] Mensagem de ${numero} (${remoteJid}): ${texto}`);
 
       const result = await processarMensagem(texto, `wa_${numero}`, 'whatsapp', numero);
       if (result.reply) {
-        enviarWhatsApp(numero, result.reply);
+        // Usa o remoteJid completo para garantir entrega correta
+        enviarWhatsApp(remoteJid, result.reply);
       }
     }
   } catch (err) {
