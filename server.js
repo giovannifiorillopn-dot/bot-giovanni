@@ -20,6 +20,7 @@ const sessions    = new Map();
 const leadData    = new Map(); // phone → { nome, cidade }
 const agendamentos = new Map(); // phone → { nome, cidade, turno, dataStr }
 const atendidos   = new Set();
+const etiquetados = new Set(); // phones com etiqueta no WhatsApp Business → bot ignora
 
 const DATA_FILE = path.join(__dirname, 'leads.json');
 
@@ -29,7 +30,8 @@ function loadData() {
     for (const [k, v] of Object.entries(d.leads || {}))       leadData.set(k, v);
     for (const [k, v] of Object.entries(d.agendamentos || {})) agendamentos.set(k, v);
     for (const v of (d.atendidos || []))                       atendidos.add(v);
-    console.log(`[Data] Carregado: ${leadData.size} leads, ${agendamentos.size} agendamentos`);
+    for (const v of (d.etiquetados || []))                     etiquetados.add(v);
+    console.log(`[Data] Carregado: ${leadData.size} leads, ${agendamentos.size} agendamentos, ${etiquetados.size} etiquetados`);
   } catch {
     console.log('[Data] Nenhum arquivo de dados encontrado — iniciando do zero.');
   }
@@ -41,6 +43,7 @@ function saveData() {
       leads:        Object.fromEntries(leadData),
       agendamentos: Object.fromEntries(agendamentos),
       atendidos:    [...atendidos],
+      etiquetados:  [...etiquetados],
     }, null, 2));
   } catch (e) {
     console.error('[Data] Erro ao salvar:', e.message);
@@ -348,6 +351,18 @@ app.post('/webhook/zapi', async (req, res) => {
   const texto = body.text?.message || body.image?.caption || '';
   if (!phone || !texto.trim()) return;
 
+  // Ignora contatos com etiqueta (WhatsApp Business labels) — atendimento humano
+  const temEtiquetaNoPayload = (body.labels?.length > 0) || (body.labelIds?.length > 0);
+  if (temEtiquetaNoPayload && !etiquetados.has(phone)) {
+    etiquetados.add(phone);
+    saveData();
+    console.log(`[Etiqueta] ${phone} adicionado automaticamente via payload.`);
+  }
+  if (etiquetados.has(phone)) {
+    console.log(`[Etiqueta] Ignorando ${phone} — contato etiquetado (atendimento humano).`);
+    return;
+  }
+
   console.log(`[Z-API] ${phone}: ${texto.slice(0, 80)}`);
 
   try {
@@ -400,6 +415,43 @@ app.post('/chat', async (req, res) => {
     res.status(500).json({ error: 'Erro interno. Tente novamente.' });
   }
 });
+
+// ─── POST /webhook/zapi-etiquetas ────────────────────────
+// Configurar no Z-API: webhook "Ao atualizar etiqueta"
+app.post('/webhook/zapi-etiquetas', (req, res) => {
+  res.sendStatus(200);
+  const { phone, action } = req.body;
+  if (!phone) return;
+
+  const phoneClean = phone.replace(/\D/g, '');
+  if (action === 'remove') {
+    etiquetados.delete(phoneClean);
+    console.log(`[Etiqueta] ${phoneClean} removido — bot voltará a responder.`);
+  } else {
+    // action === 'add' ou qualquer outro valor
+    etiquetados.add(phoneClean);
+    console.log(`[Etiqueta] ${phoneClean} marcado — bot irá ignorar.`);
+  }
+  saveData();
+});
+
+// ─── POST /etiquetado ─────────────────────────────────────
+app.post('/etiquetado', (req, res) => {
+  const { phoneNumber, remover } = req.body;
+  if (!phoneNumber) return res.status(400).json({ error: 'phoneNumber obrigatório' });
+  if (remover) {
+    etiquetados.delete(phoneNumber);
+    saveData();
+    return res.json({ ok: true, acao: 'removido', phoneNumber });
+  }
+  etiquetados.add(phoneNumber);
+  saveData();
+  console.log(`[Etiqueta] ${phoneNumber} marcado manualmente.`);
+  res.json({ ok: true, acao: 'adicionado', phoneNumber });
+});
+
+// ─── GET /etiquetados ─────────────────────────────────────
+app.get('/etiquetados', (req, res) => res.json({ etiquetados: [...etiquetados] }));
 
 // ─── POST /atendido ───────────────────────────────────────
 app.post('/atendido', (req, res) => {
