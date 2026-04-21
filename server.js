@@ -381,15 +381,12 @@ app.post('/webhook/zapi', async (req, res) => {
 
   if (body.isGroup || body.isGroupMsg) return;
 
-  console.log('[DEBUG webhook]', JSON.stringify(body).slice(0, 400));
-
   const phone = body.phone || body.from || '';
   const texto = body.text?.message || body.image?.caption || '';
   if (!phone || !texto.trim()) return;
 
   // Detecta mensagens do Dr. → suspende ou reativa bot para aquele lead
   if (body.fromMe) {
-    console.log(`[fromMe] phone=${phone} texto="${texto.slice(0,50)}"`);
     const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
     const despedidas = /\bat[eé]\s*logo\b/i;
     if (saudacoes.test(texto) && !etiquetados.has(phone)) {
@@ -476,8 +473,6 @@ app.post('/chat', async (req, res) => {
 app.post('/webhook/zapi-enviadas', (req, res) => {
   res.sendStatus(200);
   const body = req.body;
-  const elapsed = Math.round((Date.now() - startupTime) / 1000);
-  console.log(`[Enviadas] phone=${body.phone||body.to||'?'} msgId=${body.messageId||'?'} zaapId=${body.zaapId||'?'} startup=${elapsed}s`);
 
   // Ignora os primeiros 3 min após startup (evita falsos positivos de IDs desconhecidos)
   if (Date.now() - startupTime < 3 * 60 * 1000) return;
