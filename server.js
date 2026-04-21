@@ -433,6 +433,31 @@ app.post('/chat', async (req, res) => {
   }
 });
 
+// ─── POST /webhook/zapi-enviadas ─────────────────────────
+// Webhook "Ao enviar" do Z-API — detecta saudações/despedidas do Dr.
+app.post('/webhook/zapi-enviadas', (req, res) => {
+  res.sendStatus(200);
+  const body = req.body;
+  console.log('[DEBUG enviadas]', JSON.stringify(body).slice(0, 400));
+
+  const phone = (body.phone || body.to || '').replace(/\D/g, '');
+  const texto = body.text?.message || body.message || body.body || '';
+  if (!phone || !texto.trim()) return;
+
+  const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
+  const despedidas = /\bat[eé]\s*logo\b/i;
+
+  if (saudacoes.test(texto) && !etiquetados.has(phone)) {
+    etiquetados.add(phone);
+    saveData();
+    console.log(`[Enviadas] Bot suspenso para ${phone} — Dr. iniciou atendimento humano.`);
+  } else if (despedidas.test(texto) && etiquetados.has(phone)) {
+    etiquetados.delete(phone);
+    saveData();
+    console.log(`[Enviadas] Bot reativado para ${phone} — Dr. encerrou atendimento humano.`);
+  }
+});
+
 // ─── POST /webhook/zapi-etiquetas ────────────────────────
 // Configurar no Z-API: webhook "Ao atualizar etiqueta"
 app.post('/webhook/zapi-etiquetas', (req, res) => {
