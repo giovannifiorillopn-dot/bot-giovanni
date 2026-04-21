@@ -177,7 +177,7 @@ async function verificarMensagensRecentes() {
 
   for (const phone of phones) {
     try {
-      const msgs = await zapiReq('GET', `/chat-messages?phone=${phone}&page=1&pageSize=5`, null);
+      const msgs = await zapiReq('GET', `/chats/${phone}/messages?page=1&pageSize=10`, null);
       console.log(`[Polling DEBUG] ${phone}:`, JSON.stringify(msgs).slice(0, 400));
       if (!Array.isArray(msgs)) continue;
 
