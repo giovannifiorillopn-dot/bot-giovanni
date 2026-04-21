@@ -164,6 +164,51 @@ async function enviarLembreteTurno(turno, dateStr) {
   console.log(`[Lembrete] Enviado — turno ${turno} — ${pendentes.length} lead(s)`);
 }
 
+// ─── Polling: detecta saudações/despedidas do Dr. ────────
+async function verificarMensagensRecentes() {
+  const agora = Date.now();
+  const janela = 3 * 60 * 1000; // mensagens dos últimos 3 minutos
+
+  const leadsAtivos    = [...leadData.keys()].filter(p => !etiquetados.has(p) && !atendidos.has(p));
+  const leadsEtiquetados = [...etiquetados];
+  const phones = [...new Set([...leadsAtivos, ...leadsEtiquetados])];
+
+  for (const phone of phones) {
+    try {
+      const msgs = await zapiReq('GET', `/chat-messages?phone=${phone}&page=1&pageSize=5`, null);
+      if (!Array.isArray(msgs)) continue;
+
+      for (const msg of msgs) {
+        if (!msg.fromMe) continue;
+        const ts = msg.momment || msg.timestamp || 0;
+        const tsMs = ts > 1e12 ? ts : ts * 1000;
+        if (agora - tsMs > janela) continue;
+
+        const texto = msg.text?.message || msg.message || msg.body || '';
+        const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
+        const despedidas = /\bat[eé]\s*logo\b/i;
+
+        if (saudacoes.test(texto) && !etiquetados.has(phone)) {
+          etiquetados.add(phone);
+          saveData();
+          console.log(`[Polling] Bot suspenso para ${phone} — saudação detectada.`);
+          break;
+        }
+        if (despedidas.test(texto) && etiquetados.has(phone)) {
+          etiquetados.delete(phone);
+          saveData();
+          console.log(`[Polling] Bot reativado para ${phone} — despedida detectada.`);
+          break;
+        }
+      }
+    } catch { /* silencioso */ }
+  }
+}
+
+setInterval(() => {
+  verificarMensagensRecentes().catch(() => {});
+}, 90 * 1000);
+
 setInterval(() => {
   const brt = getBRT();
   const dia = brt.getUTCDay();
