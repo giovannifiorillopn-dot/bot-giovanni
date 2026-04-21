@@ -177,13 +177,13 @@ async function verificarMensagensRecentes() {
 
   for (const phone of phones) {
     try {
-      const msgs = await zapiReq('GET', `/chats/${phone}/messages?page=1&pageSize=10`, null);
+      const msgs = await zapiReq('GET', `/chat-messages/${phone}`, null);
       console.log(`[Polling DEBUG] ${phone}:`, JSON.stringify(msgs).slice(0, 400));
       if (!Array.isArray(msgs)) continue;
 
       for (const msg of msgs) {
         if (!msg.fromMe) continue;
-        const ts = msg.momment || msg.timestamp || 0;
+        const ts = msg.moment || msg.momment || msg.timestamp || 0;
         const tsMs = ts > 1e12 ? ts : ts * 1000;
         if (agora - tsMs > janela) continue;
 
