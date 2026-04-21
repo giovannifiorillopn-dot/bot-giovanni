@@ -350,13 +350,18 @@ app.post('/webhook/zapi', async (req, res) => {
   const texto = body.text?.message || body.image?.caption || '';
   if (!phone || !texto.trim()) return;
 
-  // Detecta saudação do Dr. → suspende bot para aquele lead
+  // Detecta mensagens do Dr. → suspende ou reativa bot para aquele lead
   if (body.fromMe) {
     const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
+    const despedidas = /\bat[eé]\s*logo\b/i;
     if (saudacoes.test(texto) && !etiquetados.has(phone)) {
       etiquetados.add(phone);
       saveData();
       console.log(`[Saudação] Bot suspenso para ${phone} — Dr. iniciou atendimento humano.`);
+    } else if (despedidas.test(texto) && etiquetados.has(phone)) {
+      etiquetados.delete(phone);
+      saveData();
+      console.log(`[Despedida] Bot reativado para ${phone} — Dr. encerrou atendimento humano.`);
     }
     return;
   }
