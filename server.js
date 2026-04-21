@@ -389,14 +389,17 @@ app.post('/webhook/zapi', async (req, res) => {
 
   // Detecta mensagens do Dr. → suspende ou reativa bot para aquele lead
   if (body.fromMe) {
+    console.log(`[fromMe] phone=${phone} texto="${texto.slice(0,50)}"`);
     const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
     const despedidas = /\bat[eé]\s*logo\b/i;
     if (saudacoes.test(texto) && !etiquetados.has(phone)) {
       etiquetados.add(phone);
+      etiquetadosTime.set(phone, Date.now());
       saveData();
       console.log(`[Saudação] Bot suspenso para ${phone} — Dr. iniciou atendimento humano.`);
     } else if (despedidas.test(texto) && etiquetados.has(phone)) {
       etiquetados.delete(phone);
+      etiquetadosTime.delete(phone);
       saveData();
       console.log(`[Despedida] Bot reativado para ${phone} — Dr. encerrou atendimento humano.`);
     }
