@@ -346,6 +346,8 @@ app.post('/webhook/zapi', async (req, res) => {
 
   if (body.isGroup || body.isGroupMsg) return;
 
+  console.log('[DEBUG webhook]', JSON.stringify(body).slice(0, 400));
+
   const phone = body.phone || body.from || '';
   const texto = body.text?.message || body.image?.caption || '';
   if (!phone || !texto.trim()) return;
