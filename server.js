@@ -16,21 +16,25 @@ app.use(express.static(path.join(__dirname, 'public')));
 // sessions: histórico de conversa (apenas em memória — aceitável)
 // leadData, agendamentos, atendidos: salvos em arquivo
 
-const sessions    = new Map();
-const leadData    = new Map(); // phone → { nome, cidade }
-const agendamentos = new Map(); // phone → { nome, cidade, turno, dataStr }
-const atendidos   = new Set();
-const etiquetados = new Set(); // phones com etiqueta no WhatsApp Business → bot ignora
+const sessions       = new Map();
+const leadData       = new Map(); // phone → { nome, cidade }
+const agendamentos   = new Map(); // phone → { nome, cidade, turno, dataStr }
+const atendidos      = new Set();
+const etiquetados    = new Set(); // phones suspensos → bot ignora
+const etiquetadosTime = new Map(); // phone → timestamp da suspensão (para auto-reativar em 24h)
+const botMessageIds  = new Set(); // IDs de mensagens enviadas pelo bot (para distinguir do Dr.)
+const startupTime    = Date.now(); // ignora delivery callbacks nos primeiros 3 min após startup
 
 const DATA_FILE = path.join(__dirname, 'leads.json');
 
 function loadData() {
   try {
     const d = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    for (const [k, v] of Object.entries(d.leads || {}))       leadData.set(k, v);
-    for (const [k, v] of Object.entries(d.agendamentos || {})) agendamentos.set(k, v);
-    for (const v of (d.atendidos || []))                       atendidos.add(v);
-    for (const v of (d.etiquetados || []))                     etiquetados.add(v);
+    for (const [k, v] of Object.entries(d.leads || {}))         leadData.set(k, v);
+    for (const [k, v] of Object.entries(d.agendamentos || {}))  agendamentos.set(k, v);
+    for (const v of (d.atendidos || []))                         atendidos.add(v);
+    for (const v of (d.etiquetados || []))                       etiquetados.add(v);
+    for (const [k, v] of Object.entries(d.etiquetadosTime || {})) etiquetadosTime.set(k, v);
     console.log(`[Data] Carregado: ${leadData.size} leads, ${agendamentos.size} agendamentos, ${etiquetados.size} etiquetados`);
   } catch {
     console.log('[Data] Nenhum arquivo de dados encontrado — iniciando do zero.');
@@ -40,10 +44,11 @@ function loadData() {
 function saveData() {
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify({
-      leads:        Object.fromEntries(leadData),
-      agendamentos: Object.fromEntries(agendamentos),
-      atendidos:    [...atendidos],
-      etiquetados:  [...etiquetados],
+      leads:          Object.fromEntries(leadData),
+      agendamentos:   Object.fromEntries(agendamentos),
+      atendidos:      [...atendidos],
+      etiquetados:    [...etiquetados],
+      etiquetadosTime: Object.fromEntries(etiquetadosTime),
     }, null, 2));
   } catch (e) {
     console.error('[Data] Erro ao salvar:', e.message);
@@ -103,14 +108,30 @@ function zapiReq(method, endpoint, body) {
   });
 }
 
+function registrarIdBot(result) {
+  if (!result) return;
+  if (result.zaapId)    botMessageIds.add(result.zaapId);
+  if (result.messageId) botMessageIds.add(result.messageId);
+  if (botMessageIds.size > 2000) {
+    const iter = botMessageIds.values();
+    for (let i = 0; i < 200; i++) botMessageIds.delete(iter.next().value);
+  }
+}
+
 async function enviarMensagem(phone, message) {
-  return zapiReq('POST', '/send-text', { phone: phone.replace(/\D/g, ''), message });
+  const r = await zapiReq('POST', '/send-text', { phone: phone.replace(/\D/g, ''), message });
+  registrarIdBot(r);
+  return r;
 }
 async function enviarVideo(phone, videoUrl, caption) {
-  return zapiReq('POST', '/send-video', { phone: phone.replace(/\D/g, ''), video: videoUrl, caption: caption || '' });
+  const r = await zapiReq('POST', '/send-video', { phone: phone.replace(/\D/g, ''), video: videoUrl, caption: caption || '' });
+  registrarIdBot(r);
+  return r;
 }
 async function enviarImagem(phone, imageUrl, caption) {
-  return zapiReq('POST', '/send-image', { phone: phone.replace(/\D/g, ''), image: imageUrl, caption: caption || '' });
+  const r = await zapiReq('POST', '/send-image', { phone: phone.replace(/\D/g, ''), image: imageUrl, caption: caption || '' });
+  registrarIdBot(r);
+  return r;
 }
 
 const VIDEO_TRICOSCOPIA = 'https://bot-giovanni-production.up.railway.app/tricoscopia.mp4';
@@ -164,53 +185,19 @@ async function enviarLembreteTurno(turno, dateStr) {
   console.log(`[Lembrete] Enviado — turno ${turno} — ${pendentes.length} lead(s)`);
 }
 
-// ─── Polling: detecta saudações/despedidas do Dr. ────────
-async function verificarMensagensRecentes() {
-  const agora = Date.now();
-  const janela = 3 * 60 * 1000; // mensagens dos últimos 3 minutos
-
-  const leadsAtivos    = [...leadData.keys()].filter(p => !etiquetados.has(p) && !atendidos.has(p));
-  const leadsEtiquetados = [...etiquetados];
-  const phones = [...new Set([...leadsAtivos, ...leadsEtiquetados])];
-
-  console.log(`[Polling] Verificando ${phones.length} lead(s) — ativos: ${leadsAtivos.length}, etiquetados: ${leadsEtiquetados.length}`);
-
-  for (const phone of phones) {
-    try {
-      const msgs = await zapiReq('GET', `/chat-messages/${phone}`, null);
-      console.log(`[Polling DEBUG] ${phone}:`, JSON.stringify(msgs).slice(0, 400));
-      if (!Array.isArray(msgs)) continue;
-
-      for (const msg of msgs) {
-        if (!msg.fromMe) continue;
-        const ts = msg.moment || msg.momment || msg.timestamp || 0;
-        const tsMs = ts > 1e12 ? ts : ts * 1000;
-        if (agora - tsMs > janela) continue;
-
-        const texto = msg.text?.message || msg.message || msg.body || '';
-        const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
-        const despedidas = /\bat[eé]\s*logo\b/i;
-
-        if (saudacoes.test(texto) && !etiquetados.has(phone)) {
-          etiquetados.add(phone);
-          saveData();
-          console.log(`[Polling] Bot suspenso para ${phone} — saudação detectada.`);
-          break;
-        }
-        if (despedidas.test(texto) && etiquetados.has(phone)) {
-          etiquetados.delete(phone);
-          saveData();
-          console.log(`[Polling] Bot reativado para ${phone} — despedida detectada.`);
-          break;
-        }
-      }
-    } catch { /* silencioso */ }
-  }
-}
-
+// ─── Auto-reativação após 24h ─────────────────────────────
 setInterval(() => {
-  verificarMensagensRecentes().catch(() => {});
-}, 90 * 1000);
+  const agora = Date.now();
+  const vinte4h = 24 * 60 * 60 * 1000;
+  for (const [phone, ts] of etiquetadosTime) {
+    if (agora - ts > vinte4h) {
+      etiquetados.delete(phone);
+      etiquetadosTime.delete(phone);
+      saveData();
+      console.log(`[Auto-reativar] Bot reativado para ${phone} — 24h de suspensão encerradas.`);
+    }
+  }
+}, 5 * 60 * 1000); // verifica a cada 5 minutos
 
 setInterval(() => {
   const brt = getBRT();
@@ -482,37 +469,28 @@ app.post('/chat', async (req, res) => {
 });
 
 // ─── POST /webhook/zapi-enviadas ─────────────────────────
-// Webhook "Ao enviar" do Z-API — detecta saudações/despedidas do Dr.
-app.post('/webhook/zapi-enviadas', async (req, res) => {
+// Webhook "Ao enviar" do Z-API — detecta mensagens manuais do Dr.
+app.post('/webhook/zapi-enviadas', (req, res) => {
   res.sendStatus(200);
   const body = req.body;
-  console.log('[DEBUG enviadas]', JSON.stringify(body).slice(0, 400));
 
-  const phone = (body.phone || body.to || '').replace(/\D/g, '');
+  // Ignora os primeiros 3 min após startup (evita falsos positivos de IDs desconhecidos)
+  if (Date.now() - startupTime < 3 * 60 * 1000) return;
+
+  const phone     = (body.phone || body.to || '').replace(/\D/g, '');
   const messageId = body.messageId || body.id;
-  if (!phone || !messageId) return;
+  const zaapId    = body.zaapId;
+  if (!phone) return;
 
-  try {
-    const msg = await zapiReq('GET', `/messages/${messageId}`, null);
-    console.log('[DEBUG msg]', JSON.stringify(msg).slice(0, 400));
+  // Se o ID foi registrado pelo bot, é mensagem nossa — ignorar
+  if ((messageId && botMessageIds.has(messageId)) || (zaapId && botMessageIds.has(zaapId))) return;
 
-    const texto = msg?.text?.message || msg?.message || msg?.body || msg?.caption || '';
-    if (!texto.trim()) return;
-
-    const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
-    const despedidas = /\bat[eé]\s*logo\b/i;
-
-    if (saudacoes.test(texto) && !etiquetados.has(phone)) {
-      etiquetados.add(phone);
-      saveData();
-      console.log(`[Enviadas] Bot suspenso para ${phone} — Dr. iniciou atendimento humano.`);
-    } else if (despedidas.test(texto) && etiquetados.has(phone)) {
-      etiquetados.delete(phone);
-      saveData();
-      console.log(`[Enviadas] Bot reativado para ${phone} — Dr. encerrou atendimento humano.`);
-    }
-  } catch (e) {
-    console.error('[Enviadas] Erro ao buscar mensagem:', e.message);
+  // ID desconhecido = Dr. enviou manualmente → suspender bot
+  if (!etiquetados.has(phone)) {
+    etiquetados.add(phone);
+    etiquetadosTime.set(phone, Date.now());
+    saveData();
+    console.log(`[Dr.] Bot suspenso para ${phone} — mensagem manual detectada.`);
   }
 });
 
