@@ -344,12 +344,22 @@ app.post('/webhook/zapi', async (req, res) => {
   res.sendStatus(200);
   const body = req.body;
 
-  if (body.fromMe) return;
   if (body.isGroup || body.isGroupMsg) return;
 
   const phone = body.phone || body.from || '';
   const texto = body.text?.message || body.image?.caption || '';
   if (!phone || !texto.trim()) return;
+
+  // Detecta saudação do Dr. → suspende bot para aquele lead
+  if (body.fromMe) {
+    const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
+    if (saudacoes.test(texto) && !etiquetados.has(phone)) {
+      etiquetados.add(phone);
+      saveData();
+      console.log(`[Saudação] Bot suspenso para ${phone} — Dr. iniciou atendimento humano.`);
+    }
+    return;
+  }
 
   // Ignora contatos com etiqueta (WhatsApp Business labels) — atendimento humano
   const temEtiquetaNoPayload = (body.labels?.length > 0) || (body.labelIds?.length > 0);
