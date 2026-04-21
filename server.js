@@ -435,26 +435,36 @@ app.post('/chat', async (req, res) => {
 
 // ─── POST /webhook/zapi-enviadas ─────────────────────────
 // Webhook "Ao enviar" do Z-API — detecta saudações/despedidas do Dr.
-app.post('/webhook/zapi-enviadas', (req, res) => {
+app.post('/webhook/zapi-enviadas', async (req, res) => {
   res.sendStatus(200);
   const body = req.body;
   console.log('[DEBUG enviadas]', JSON.stringify(body).slice(0, 400));
 
   const phone = (body.phone || body.to || '').replace(/\D/g, '');
-  const texto = body.text?.message || body.message || body.body || '';
-  if (!phone || !texto.trim()) return;
+  const messageId = body.messageId || body.id;
+  if (!phone || !messageId) return;
 
-  const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
-  const despedidas = /\bat[eé]\s*logo\b/i;
+  try {
+    const msg = await zapiReq('GET', `/messages/${messageId}`, null);
+    console.log('[DEBUG msg]', JSON.stringify(msg).slice(0, 400));
 
-  if (saudacoes.test(texto) && !etiquetados.has(phone)) {
-    etiquetados.add(phone);
-    saveData();
-    console.log(`[Enviadas] Bot suspenso para ${phone} — Dr. iniciou atendimento humano.`);
-  } else if (despedidas.test(texto) && etiquetados.has(phone)) {
-    etiquetados.delete(phone);
-    saveData();
-    console.log(`[Enviadas] Bot reativado para ${phone} — Dr. encerrou atendimento humano.`);
+    const texto = msg?.text?.message || msg?.message || msg?.body || msg?.caption || '';
+    if (!texto.trim()) return;
+
+    const saudacoes = /\b(bom\s*dia|boa\s*tarde|boa\s*noite)\b/i;
+    const despedidas = /\bat[eé]\s*logo\b/i;
+
+    if (saudacoes.test(texto) && !etiquetados.has(phone)) {
+      etiquetados.add(phone);
+      saveData();
+      console.log(`[Enviadas] Bot suspenso para ${phone} — Dr. iniciou atendimento humano.`);
+    } else if (despedidas.test(texto) && etiquetados.has(phone)) {
+      etiquetados.delete(phone);
+      saveData();
+      console.log(`[Enviadas] Bot reativado para ${phone} — Dr. encerrou atendimento humano.`);
+    }
+  } catch (e) {
+    console.error('[Enviadas] Erro ao buscar mensagem:', e.message);
   }
 });
 
