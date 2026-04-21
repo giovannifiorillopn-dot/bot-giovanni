@@ -173,6 +173,8 @@ async function verificarMensagensRecentes() {
   const leadsEtiquetados = [...etiquetados];
   const phones = [...new Set([...leadsAtivos, ...leadsEtiquetados])];
 
+  console.log(`[Polling] Verificando ${phones.length} lead(s) — ativos: ${leadsAtivos.length}, etiquetados: ${leadsEtiquetados.length}`);
+
   for (const phone of phones) {
     try {
       const msgs = await zapiReq('GET', `/chat-messages?phone=${phone}&page=1&pageSize=5`, null);
