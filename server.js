@@ -473,6 +473,8 @@ app.post('/chat', async (req, res) => {
 app.post('/webhook/zapi-enviadas', (req, res) => {
   res.sendStatus(200);
   const body = req.body;
+  const elapsed = Math.round((Date.now() - startupTime) / 1000);
+  console.log(`[Enviadas] phone=${body.phone||body.to||'?'} msgId=${body.messageId||'?'} zaapId=${body.zaapId||'?'} startup=${elapsed}s`);
 
   // Ignora os primeiros 3 min após startup (evita falsos positivos de IDs desconhecidos)
   if (Date.now() - startupTime < 3 * 60 * 1000) return;
