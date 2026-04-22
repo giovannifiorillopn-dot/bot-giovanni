@@ -377,6 +377,7 @@ app.get('/wa-status', async (req, res) => {
 // ─── POST /webhook/zapi ───────────────────────────────────
 app.post('/webhook/zapi', async (req, res) => {
   res.sendStatus(200);
+  return; // BOT PAUSADO
   const body = req.body;
 
   if (body.isGroup || body.isGroupMsg) return;
